@@ -7,20 +7,14 @@ use ink::env::Error as EnvError;
 pub enum Error {
     /// Bad origin error, e.g., wrong caller
     BadOrigin,
-    /// Bank is close
-    BankIsClose,
-    /// Bank account maximum reached
-    BankAccountMaxOut,
+    /// Xaver is close
+    XaverIsClose,
+    /// Xaver staking maximum reached
+    XaverStakingMaxOut,
     /// There is already an existing account
-    AccountAlreadyExist,
+    XaverStakeAlreadyExist,
     /// Account not found
-    AccountNotFound,
-    /// Account Balance Insufficient
-    AccountBalanceInsufficient,
-    /// Account Balance Overflow
-    AccountBalanceOverflow,
-    /// Account frozen
-    AccountFrozen,
+    XaverStakeNotFound,
 }
 
 /// Runtime call execution error

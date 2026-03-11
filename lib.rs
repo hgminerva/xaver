@@ -51,7 +51,7 @@ mod xaver {
     /// Xaver staker
     #[derive(scale::Encode, scale::Decode, Clone, Debug, PartialEq, Eq)]
     #[cfg_attr(feature = "std", derive(scale_info::TypeInfo, ink::storage::traits::StorageLayout))]
-    pub struct Staker {
+    pub struct Stake {
         /// Account address
         pub account: AccountId,
         /// Accumulated income
@@ -75,10 +75,10 @@ mod xaver {
         pub price: u16,
         /// Share percentage (0.1%, 1%, 2%, 10%)
         pub share: u16,
-        /// Maximum stakers of the xaver node
-        pub maximum_stakers: u16,
+        /// Maximum stakes of the xaver node
+        pub maximum_stakes: u16,
         /// Stakers
-        pub stakers: Vec<Staker>,
+        pub stakes: Vec<Stake>,
         /// Status (0-Open, 1-Close)
         pub status: u8,
     }
@@ -88,7 +88,7 @@ mod xaver {
         /// Create new bank
         #[ink(constructor)]
         pub fn new(asset_id: u128, 
-            maximum_stakers: u16) -> Self {
+            maximum_stakes: u16) -> Self {
 
             let caller: ink::primitives::AccountId = Self::env().caller();
 
@@ -98,8 +98,8 @@ mod xaver {
                 operator: caller,
                 price: 0u16,
                 share: 0u16,
-                maximum_stakers: maximum_stakers,
-                stakers: Vec::new(),
+                maximum_stakes: maximum_stakes,
+                stakes: Vec::new(),
                 status: 0u8,
             }
         }
@@ -117,7 +117,7 @@ mod xaver {
             operator: AccountId,
             price: u16,
             share: u16,
-            maximum_stakers: u16) -> Result<(), Error> {
+            maximum_stakes: u16) -> Result<(), Error> {
             
             // Setup can only be done by the owner
             let caller = self.env().caller();
@@ -134,8 +134,8 @@ mod xaver {
             self.operator = operator;
             self.price = price;
             self.share = share;
-            self.maximum_stakers = maximum_stakers;
-            self.stakers =  Vec::new();
+            self.maximum_stakes = maximum_stakes;
+            self.stakes =  Vec::new();
             self.status = 0;
 
             self.env().emit_event(XaverEvent {
@@ -155,7 +155,7 @@ mod xaver {
                 self.operator,
                 self.price,
                 self.share,
-                self.maximum_stakers,
+                self.maximum_stakes,
                 self.status,
             )
         }
@@ -219,58 +219,58 @@ mod xaver {
             // asset is verified through the tx-hash.
             let caller = self.env().caller();
             if self.env().caller() != self.manager {
-                self.env().emit_event(BankingEvent {
+                self.env().emit_event(XaverEvent {
                     operator: caller,
-                    status: BankTransactionStatus::EmitError(Error::BadOrigin),
+                    status: XaverTransactionStatus::EmitError(Error::BadOrigin),
                 });
                 return Ok(());
             } 
 
-            // Check if the bank is open
+            // Check if the xaver node is open
             if self.status != 0 {
-                self.env().emit_event(BankingEvent {
+                self.env().emit_event(XaverEvent {
                     operator: caller,
-                    status: BankTransactionStatus::EmitError(Error::BankIsClose),
+                    status: XaverTransactionStatus::EmitError(Error::XaverIsClose),
                 });
                 return Ok(());
             }
 
-            // Search if the account exist already, if it does in just add to the
-            // ledger the amount deposited, if not then create the new account.
-            // 1. Update a balance
+            // Search if the account exist already, duplicate account is not 
+            // allowed.
             let mut account_found = false;
-            for ledger in self.ledgers.iter_mut() {
+            for ledger in self.stakers.iter_mut() {
                 if ledger.account == account {
                     
-                    ledger.balance = ledger
-                        .balance
-                        .checked_add(amount)
-                        .ok_or(Error::AccountBalanceOverflow)?; 
+                    self.env().emit_event(XaverEvent {
+                        operator: caller,
+                        status: XaverTransactionStatus::EmitError(Error::XaverStakeAlreadyExist),
+                    });
+                    return Ok(());
 
-                    account_found = true;
-                    break;
                 }
             }
-            // 2. Create a new account if the account does not exist
+
+            // Add to staking
             if !account_found {
                 if self.ledgers.len() as u16 >= self.maximum_accounts {
-                    self.env().emit_event(BankingEvent {
+                    self.env().emit_event(XaverEvent {
                         operator: caller,
-                        status: BankTransactionStatus::EmitError(Error::BankAccountMaxOut),
+                        status: XaverTransactionStatus::EmitError(Error::XaverStakingMaxOut),
                     });
                     return Ok(());
                 }
-                let new_ledger = Ledger {
+                let new_stake = Stake {
                     account,
-                    balance: amount,
+                    accumulated_income: 0u128,
+                    cessation_block: 0u128,
                     status: 1, // 1 = Liquid
                 };
                 self.ledgers.push(new_ledger);
             }
 
-            self.env().emit_event(BankingEvent {
+            self.env().emit_event(XaverEvent {
                 operator: caller,
-                status: BankTransactionStatus::EmitSuccess(Success::AccountDepositSuccess),
+                status: XaverTransactionStatus::EmitSuccess(Success::StakingSuccess),
             });
 
             Ok(())
@@ -279,25 +279,24 @@ mod xaver {
         /// Unstake from xaver
         #[ink(message)]
         pub fn unstake(&mut self,
-            account: AccountId,
-            amount: u128) -> Result<(), ContractError> {
+            account: AccountId) -> Result<(), ContractError> {
 
-            // Withdraw can only be done by the manager once the balance of the account
-            // is sufficient for withdrawal
+            // Withdraw can only be done by the operator once the balance of the stake
+            // is beyond the cessation block and is not renewed.
             let caller = self.env().caller();
             if self.env().caller() != self.manager {
-                self.env().emit_event(BankingEvent {
+                self.env().emit_event(XaverEvent {
                     operator: caller,
-                    status: BankTransactionStatus::EmitError(Error::BadOrigin),
+                    status: XaverTransactionStatus::EmitError(Error::BadOrigin),
                 });
                 return Ok(());
             } 
 
-            // Check if the bank is open
+            // Check if the xaver is open
             if self.status != 0 {
-                self.env().emit_event(BankingEvent {
+                self.env().emit_event(XaverEvent {
                     operator: caller,
-                    status: BankTransactionStatus::EmitError(Error::BankIsClose),
+                    status: XaverTransactionStatus::EmitError(Error::XaverIsClose),
                 });
                 return Ok(());
             }
