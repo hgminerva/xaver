@@ -10,9 +10,7 @@ pub mod errors;
 mod xaver {
 
     use ink::prelude::vec::Vec;
-
-    use crate::errors::{Error, RuntimeError, ContractError};
-    use crate::assets::{AssetsCall, RuntimeCall};
+    use crate::errors::{Error, ContractError};
 
     /// Success Messages
     #[derive(scale::Encode, scale::Decode, Debug, Clone, PartialEq, Eq)]
@@ -246,10 +244,8 @@ mod xaver {
 
             // Search if the account exist already, duplicate account is not 
             // allowed.
-            let mut account_found = false;
             for stake in self.stakes.iter_mut() {
                 if stake.account == account {
-                    
                     self.env().emit_event(XaverEvent {
                         operator: caller,
                         status: XaverTransactionStatus::EmitError(Error::XaverStakeAlreadyExist),
@@ -260,22 +256,20 @@ mod xaver {
             }
 
             // Add to staking
-            if !account_found {
-                if self.stakes.len() as u16 >= self.maximum_stakes {
-                    self.env().emit_event(XaverEvent {
-                        operator: caller,
-                        status: XaverTransactionStatus::EmitError(Error::XaverStakingMaxOut),
-                    });
-                    return Ok(());
-                }
-                let new_stake = Stake {
-                    account,
-                    accumulated_income: 0u128,
-                    cessation_block: self.env().block_number() as u128 + 5_256_000u128, //365 days with 6 seconds per block
-                    status: 1, // 1 = Liquid
-                };
-                self.stakes.push(new_stake);
+            if self.stakes.len() as u16 >= self.maximum_stakes {
+                self.env().emit_event(XaverEvent {
+                    operator: caller,
+                    status: XaverTransactionStatus::EmitError(Error::XaverStakingMaxOut),
+                });
+                return Ok(());
             }
+            let new_stake = Stake {
+                account,
+                accumulated_income: 0u128,
+                cessation_block: self.env().block_number() as u128 + 5_256_000u128, //365 days with 6 seconds per block
+                status: 1, // 1 = Liquid
+            };
+            self.stakes.push(new_stake);
 
             self.env().emit_event(XaverEvent {
                 operator: caller,
