@@ -20,16 +20,18 @@ mod xaver {
     pub enum Success {
         /// Xaver setup successful
         XaverSetupSuccess,
-        /// Bank close successful
+        /// Xaver close successful
         XaverCloseSuccess,
-        /// Bank open successful
+        /// Xaver open successful
         XaverOpenSuccess,
         /// Staking successful
         StakingSuccess,
         /// Unstaking successful
         UnstakingSuccess,
         /// Staking interest success
-        StakingInterestSuccess,        
+        StakingInterestSuccess,
+        /// Income credited success        
+        IncomeCreditSuccess,
     }    
 
     /// Xaver transaction status
@@ -45,7 +47,7 @@ mod xaver {
     pub struct XaverEvent {
         #[ink(topic)]
         operator: AccountId,
-        status: BankTransactionStatus,
+        status: XaverTransactionStatus,
     }     
 
     /// Xaver staker
@@ -65,8 +67,10 @@ mod xaver {
     /// Xaver storage
     #[ink(storage)]
     pub struct Xaver {
-        /// Xaver asset
+        /// Xaver asset, e.g., XAV
         pub asset_id: u128,
+        /// Stable asset id, e.g., USDT
+        pub stable_asset_id: u128,
         /// Owner
         pub owner: AccountId,
         /// Operator
@@ -85,15 +89,17 @@ mod xaver {
 
     impl Xaver {
 
-        /// Create new bank
+        /// Create new xaver
         #[ink(constructor)]
         pub fn new(asset_id: u128, 
+            stable_asset_id: u128,
             maximum_stakes: u16) -> Self {
 
             let caller: ink::primitives::AccountId = Self::env().caller();
 
             Self { 
                 asset_id: asset_id, 
+                stable_asset_id: stable_asset_id,
                 owner: caller,
                 operator: caller,
                 price: 0u16,
@@ -107,13 +113,14 @@ mod xaver {
         /// Default setup
         #[ink(constructor)]
         pub fn default() -> Self {
-            Self::new(0u128, 0u16)
+            Self::new(0u128, 0u128, 0u16)
         }
 
         /// Setup xaver
         #[ink(message)]
         pub fn setup(&mut self,
             asset_id: u128,
+            stable_asset_id: u128,
             operator: AccountId,
             price: u16,
             share: u16,
@@ -131,6 +138,7 @@ mod xaver {
 
             // The setup will delete all existing stakers - Very Important!
             self.asset_id = asset_id;
+            self.stable_asset_id = stable_asset_id;
             self.operator = operator;
             self.price = price;
             self.share = share;
@@ -148,9 +156,10 @@ mod xaver {
 
         /// Get xaver information
         #[ink(message)]
-        pub fn get(&self) -> (u128, AccountId, AccountId, u16, u16, u16, u8) {
+        pub fn get(&self) -> (u128, u128, AccountId, AccountId, u16, u16, u16, u8) {
             (
                 self.asset_id,
+                self.stable_asset_id,
                 self.owner,
                 self.operator,
                 self.price,
@@ -218,7 +227,7 @@ mod xaver {
             // Staking can only be done by the operator once the transfer of the 
             // asset is verified through the tx-hash.
             let caller = self.env().caller();
-            if self.env().caller() != self.manager {
+            if self.env().caller() != self.operator {
                 self.env().emit_event(XaverEvent {
                     operator: caller,
                     status: XaverTransactionStatus::EmitError(Error::BadOrigin),
@@ -238,8 +247,8 @@ mod xaver {
             // Search if the account exist already, duplicate account is not 
             // allowed.
             let mut account_found = false;
-            for ledger in self.stakers.iter_mut() {
-                if ledger.account == account {
+            for stake in self.stakes.iter_mut() {
+                if stake.account == account {
                     
                     self.env().emit_event(XaverEvent {
                         operator: caller,
@@ -252,7 +261,7 @@ mod xaver {
 
             // Add to staking
             if !account_found {
-                if self.ledgers.len() as u16 >= self.maximum_accounts {
+                if self.stakes.len() as u16 >= self.maximum_stakes {
                     self.env().emit_event(XaverEvent {
                         operator: caller,
                         status: XaverTransactionStatus::EmitError(Error::XaverStakingMaxOut),
@@ -262,10 +271,10 @@ mod xaver {
                 let new_stake = Stake {
                     account,
                     accumulated_income: 0u128,
-                    cessation_block: 0u128,
+                    cessation_block: self.env().block_number() as u128 + 5_256_000u128, //365 days with 6 seconds per block
                     status: 1, // 1 = Liquid
                 };
-                self.ledgers.push(new_ledger);
+                self.stakes.push(new_stake);
             }
 
             self.env().emit_event(XaverEvent {
@@ -281,10 +290,10 @@ mod xaver {
         pub fn unstake(&mut self,
             account: AccountId) -> Result<(), ContractError> {
 
-            // Withdraw can only be done by the operator once the balance of the stake
+            // Unstake can only be done by the operator once the stake
             // is beyond the cessation block and is not renewed.
             let caller = self.env().caller();
-            if self.env().caller() != self.manager {
+            if self.env().caller() != self.operator {
                 self.env().emit_event(XaverEvent {
                     operator: caller,
                     status: XaverTransactionStatus::EmitError(Error::BadOrigin),
@@ -301,51 +310,45 @@ mod xaver {
                 return Ok(());
             }
 
-            // Search if the account exist already, if it does, check if the balance is
-            // sufficient, if so, deduct the ledger, if not raise a balance insufficient
-            // error.
-            let mut account_found = false;
-            for ledger in self.ledgers.iter_mut() {
-                if ledger.account == account {
-                    account_found = true;
+            // Search if the stake exist already, if it does, check if the current block
+            // is greater than the cessation block if ok, transfer all income then remove
+            // the stake.
+            let current_block = self.env().block_number() as u128;
+            let mut found_index: Option<usize> = None;
 
-                    // Check if balance is sufficient
-                    if ledger.balance < amount {
-                        self.env().emit_event(BankingEvent {
+            for (index, stake) in self.stakes.iter().enumerate() {
+                if stake.account == account {
+                    
+                    // Check if cessation block has not been reached yet
+                    if current_block <= stake.cessation_block {
+                        self.env().emit_event(XaverEvent {
                             operator: caller,
-                            status: BankTransactionStatus::EmitError(Error::AccountBalanceInsufficient),
+                            status: XaverTransactionStatus::EmitError(Error::XaverStakeNotCeased),
                         });
                         return Ok(());
                     }
 
-                    // Deduct the amount
-                    ledger.balance -= amount;
-
-                    // Transfer the asset to the account
-                    self.env()
-                        .call_runtime(&RuntimeCall::Assets(AssetsCall::Transfer {
-                            id: self.asset_id,
-                            target: account.into(),
-                            amount: amount,
-                        }))
-                        .map_err(|_| RuntimeError::CallRuntimeFailed)?;
-
+                    found_index = Some(index);
                     break;
                 }
             }
 
-            if !account_found {
-                self.env().emit_event(BankingEvent {
-                    operator: caller,
-                    status: BankTransactionStatus::EmitError(Error::AccountNotFound),
-                });
-                return Ok(());
+            // Remove the stake if found, otherwise emit error
+            match found_index {
+                Some(index) => {
+                    self.stakes.swap_remove(index);
+                    self.env().emit_event(XaverEvent {
+                        operator: caller,
+                        status: XaverTransactionStatus::EmitSuccess(Success::UnstakingSuccess),
+                    });
+                }
+                None => {
+                    self.env().emit_event(XaverEvent {
+                        operator: caller,
+                        status: XaverTransactionStatus::EmitError(Error::XaverStakeNotFound),
+                    });
+                }
             }
-
-            self.env().emit_event(BankingEvent {
-                operator: caller,
-                status: BankTransactionStatus::EmitSuccess(Success::AccountWithdrawalSuccess),
-            });
 
             Ok(())
         }
@@ -353,74 +356,39 @@ mod xaver {
         /// Credit to staker and increment accumulated income
         #[ink(message)]
         pub fn income(&mut self,
-            account: AccountId,
             amount: u128) -> Result<(), Error> {
             
             // Credit is adding to the balance of an account, this is done only
-            // by the manager.
+            // by the operator.
             let caller = self.env().caller();
 
-            if self.env().caller() != self.manager {
-                self.env().emit_event(BankingEvent {
+            if self.env().caller() != self.operator {
+                self.env().emit_event(XaverEvent {
                     operator: caller,
-                    status: BankTransactionStatus::EmitError(Error::BadOrigin),
+                    status: XaverTransactionStatus::EmitError(Error::BadOrigin),
                 });
                 return Ok(());
             } 
 
-            // Check if the bank is open
+            // Check if the xaver is open
             if self.status != 0 {
-                self.env().emit_event(BankingEvent {
+                self.env().emit_event(XaverEvent {
                     operator: caller,
-                    status: BankTransactionStatus::EmitError(Error::BankIsClose),
+                    status: XaverTransactionStatus::EmitError(Error::XaverIsClose),
                 });
                 return Ok(());
             }
 
-            // Search for the caller account in the ledger, if found, add to the balance
-            // the given amount.
-            let mut account_found = false;
-
-            for ledger in self.ledgers.iter_mut() {
-                if ledger.account == account {
-                    account_found = true;
-
-                    // Check if account is liquid
-                    if ledger.status != 1 {
-                        self.env().emit_event(BankingEvent {
-                            operator: caller,
-                            status: BankTransactionStatus::EmitError(Error::AccountFrozen),
-                        });
-                        return Ok(());
-                    }
-
-                    // Add the amount to the balance safely
-                    match ledger.balance.checked_add(amount) {
-                        Some(new_balance) => ledger.balance = new_balance,
-                        None => {
-                            self.env().emit_event(BankingEvent {
-                                operator: caller,
-                                status: BankTransactionStatus::EmitError(Error::AccountBalanceOverflow),
-                            });
-                            return Ok(());
-                        }
-                    }
-
-                    break;
+            let income_per_staker = (amount * self.share as u128) / 100u128;
+            for stake in self.stakes.iter_mut() {
+                if stake.status == 1 {
+                    stake.accumulated_income += income_per_staker;
                 }
             }
 
-            if !account_found {
-                self.env().emit_event(BankingEvent {
-                    operator: caller,
-                    status: BankTransactionStatus::EmitError(Error::AccountNotFound),
-                });
-                return Ok(());
-            }
-
-            self.env().emit_event(BankingEvent {
+            self.env().emit_event(XaverEvent {
                 operator: caller,
-                status: BankTransactionStatus::EmitSuccess(Success::AccountCreditSuccess),
+                status: XaverTransactionStatus::EmitSuccess(Success::IncomeCreditSuccess),
             });
 
             Ok(())
@@ -429,11 +397,11 @@ mod xaver {
         /// Get staker information
         #[ink(message)]
         pub fn get_staker(&self,
-            account: AccountId) ->  Option<Ledger> {
+            account: AccountId) ->  Option<Stake> {
 
-            for ledger in self.ledgers.iter() {
-                if ledger.account == account {
-                    return Some(ledger.clone()); 
+            for stake in self.stakes.iter() {
+                if stake.account == account {
+                    return Some(stake.clone()); 
                 }
             }
 
@@ -451,7 +419,7 @@ mod xaver {
         /// We test if the default constructor does its job.
         #[ink::test]
         fn default_works() {
-            let Bank = Bank::default();
+            let Xaver = Xaver::default();
         }
     }
 
@@ -476,18 +444,18 @@ mod xaver {
         #[ink_e2e::test]
         async fn default_works(mut client: ink_e2e::Client<C, E>) -> E2EResult<()> {
             // Given
-            let constructor = BankRef::default();
+            let constructor = XaverRef::default();
 
             // When
             let contract_account_id = client
-                .instantiate("bank", &ink_e2e::alice(), constructor, 0, None)
+                .instantiate("xaver", &ink_e2e::alice(), constructor, 0, None)
                 .await
                 .expect("instantiate failed")
                 .account_id;
 
             // Then
-            let get = build_message::<BankRef>(contract_account_id.clone())
-                .call(|bank| bank.get());
+            let get = build_message::<XaverRef>(contract_account_id.clone())
+                .call(|xaver| xaver.get());
             let get_result = client.call_dry_run(&ink_e2e::alice(), &get, 0, None).await;
             assert!(matches!(get_result.return_value(), false));
 
@@ -498,29 +466,29 @@ mod xaver {
         #[ink_e2e::test]
         async fn it_works(mut client: ink_e2e::Client<C, E>) -> E2EResult<()> {
             // Given
-            let constructor = BankRef::new(false);
+            let constructor = XaverRef::new(false);
             let contract_account_id = client
-                .instantiate("bank", &ink_e2e::bob(), constructor, 0, None)
+                .instantiate("xaver", &ink_e2e::bob(), constructor, 0, None)
                 .await
                 .expect("instantiate failed")
                 .account_id;
 
-            let get = build_message::<BankRef>(contract_account_id.clone())
-                .call(|bank| bank.get());
+            let get = build_message::<XaverRef>(contract_account_id.clone())
+                .call(|xaver| xaver.get());
             let get_result = client.call_dry_run(&ink_e2e::bob(), &get, 0, None).await;
             assert!(matches!(get_result.return_value(), false));
 
             // When
-            let flip = build_message::<BankRef>(contract_account_id.clone())
-                .call(|bank| bank.flip());
+            let flip = build_message::<XaverRef>(contract_account_id.clone())
+                .call(|xaver| xaver.flip());
             let _flip_result = client
                 .call(&ink_e2e::bob(), flip, 0, None)
                 .await
                 .expect("flip failed");
 
             // Then
-            let get = build_message::<BankRef>(contract_account_id.clone())
-                .call(|bank| bank.get());
+            let get = build_message::<XaverRef>(contract_account_id.clone())
+                .call(|xaver| xaver.get());
             let get_result = client.call_dry_run(&ink_e2e::bob(), &get, 0, None).await;
             assert!(matches!(get_result.return_value(), true));
 

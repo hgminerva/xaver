@@ -13,8 +13,10 @@ pub enum Error {
     XaverStakingMaxOut,
     /// There is already an existing account
     XaverStakeAlreadyExist,
-    /// Account not found
+    /// Stake not found
     XaverStakeNotFound,
+    /// Cessation block is invalid, during unstaking
+    XaverStakeNotCeased,
 }
 
 /// Runtime call execution error
