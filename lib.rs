@@ -10,7 +10,8 @@ pub mod errors;
 mod xaver {
 
     use ink::prelude::vec::Vec;
-    use crate::errors::{Error, ContractError};
+    use crate::errors::{Error, RuntimeError, ContractError};
+    use crate::assets::{AssetsCall, RuntimeCall};
 
     /// Success Messages
     #[derive(scale::Encode, scale::Decode, Debug, Clone, PartialEq, Eq)]
@@ -54,6 +55,8 @@ mod xaver {
     pub struct Stake {
         /// Account address
         pub account: AccountId,
+        /// Stake tx hash proof (USDT payment)
+        pub tx_hash: Vec<u8>,
         /// Accumulated income
         pub accumulated_income: u128,
         /// Cessation block
@@ -79,6 +82,8 @@ mod xaver {
         pub share: u16,
         /// Maximum stakes of the xaver node
         pub maximum_stakes: u16,
+        /// Duration
+        pub duration: u128, //5_256_000u128 (365 days with 6 seconds per block)
         /// Stakers
         pub stakes: Vec<Stake>,
         /// Status (0-Open, 1-Close)
@@ -103,6 +108,7 @@ mod xaver {
                 price: 0u16,
                 share: 0u16,
                 maximum_stakes: maximum_stakes,
+                duration: 0u128,
                 stakes: Vec::new(),
                 status: 0u8,
             }
@@ -122,7 +128,8 @@ mod xaver {
             operator: AccountId,
             price: u16,
             share: u16,
-            maximum_stakes: u16) -> Result<(), Error> {
+            maximum_stakes: u16,
+            duration: u128,) -> Result<(), Error> {
             
             // Setup can only be done by the owner
             let caller = self.env().caller();
@@ -141,6 +148,7 @@ mod xaver {
             self.price = price;
             self.share = share;
             self.maximum_stakes = maximum_stakes;
+            self.duration = duration;
             self.stakes =  Vec::new();
             self.status = 0;
 
@@ -154,7 +162,7 @@ mod xaver {
 
         /// Get xaver information
         #[ink(message)]
-        pub fn get(&self) -> (u128, u128, AccountId, AccountId, u16, u16, u16, u8) {
+        pub fn get(&self) -> (u128, u128, AccountId, AccountId, u16, u16, u16, u128, u8) {
             (
                 self.asset_id,
                 self.stable_asset_id,
@@ -163,6 +171,7 @@ mod xaver {
                 self.price,
                 self.share,
                 self.maximum_stakes,
+                self.duration,
                 self.status,
             )
         }
@@ -220,7 +229,8 @@ mod xaver {
         /// Stake to xaver
         #[ink(message)]
         pub fn stake(&mut self,
-            account: AccountId) -> Result<(), Error> {
+            account: AccountId,
+            tx_hash: Vec<u8>) -> Result<(), Error> {
 
             // Staking can only be done by the operator once the transfer of the 
             // asset is verified through the tx-hash.
@@ -256,6 +266,7 @@ mod xaver {
             }
 
             // Add to staking
+            // 1. Check maximum stake
             if self.stakes.len() as u16 >= self.maximum_stakes {
                 self.env().emit_event(XaverEvent {
                     operator: caller,
@@ -263,13 +274,24 @@ mod xaver {
                 });
                 return Ok(());
             }
+            // 2. Add stake
             let new_stake = Stake {
                 account,
+                tx_hash: tx_hash,
                 accumulated_income: 0u128,
-                cessation_block: self.env().block_number() as u128 + 5_256_000u128, //365 days with 6 seconds per block
+                cessation_block: self.env().block_number() as u128 + self.duration,
                 status: 1, // 1 = Liquid
             };
             self.stakes.push(new_stake);
+            // 3. Send receipt token, e.g., XAV
+            let _ = self.env()
+                .call_runtime(&RuntimeCall::Assets(AssetsCall::Transfer {
+                    id: self.asset_id,
+                    target: account.into(),
+                    amount: self.price.into(),
+                }))
+                .map_err(|_| RuntimeError::CallRuntimeFailed);
+
 
             self.env().emit_event(XaverEvent {
                 operator: caller,
@@ -309,12 +331,14 @@ mod xaver {
             // the stake.
             let current_block = self.env().block_number() as u128;
             let mut found_index: Option<usize> = None;
+            let mut staker_account: AccountId = account;         // ← save staker data
+            let mut staker_income: u128 = 0;  
 
-            for (index, stake) in self.stakes.iter().enumerate() {
-                if stake.account == account {
+            for (index, staker) in self.stakes.iter().enumerate() {
+                if staker.account == account {
                     
                     // Check if cessation block has not been reached yet
-                    if current_block <= stake.cessation_block {
+                    if current_block <= staker.cessation_block {
                         self.env().emit_event(XaverEvent {
                             operator: caller,
                             status: XaverTransactionStatus::EmitError(Error::XaverStakeNotCeased),
@@ -322,20 +346,32 @@ mod xaver {
                         return Ok(());
                     }
 
+                    staker_account = staker.account;
+                    staker_income = staker.accumulated_income; 
                     found_index = Some(index);
                     break;
                 }
             }
 
-            // Remove the stake if found, otherwise emit error
+            // Remove the stake if found send the accumulated income and remove it, otherwise emit error
             match found_index {
                 Some(index) => {
+                    // 1. Transfer the accumulated income
+                    self.env()
+                        .call_runtime(&RuntimeCall::Assets(AssetsCall::Transfer {
+                            id: self.stable_asset_id,
+                            target: staker_account.into(),
+                            amount: staker_income,
+                        }))
+                        .map_err(|_| RuntimeError::CallRuntimeFailed)?;
+                    // 2. Remove the stake
                     self.stakes.swap_remove(index);
+
                     self.env().emit_event(XaverEvent {
                         operator: caller,
                         status: XaverTransactionStatus::EmitSuccess(Success::UnstakingSuccess),
                     });
-                }
+                    }
                 None => {
                     self.env().emit_event(XaverEvent {
                         operator: caller,
@@ -373,7 +409,7 @@ mod xaver {
                 return Ok(());
             }
 
-            let income_per_staker = (amount * self.share as u128) / 100u128;
+            let income_per_staker = (amount * self.share as u128) / self.maximum_stakes as u128;
             for stake in self.stakes.iter_mut() {
                 if stake.status == 1 {
                     stake.accumulated_income += income_per_staker;
