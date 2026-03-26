@@ -230,7 +230,7 @@ mod xaver {
         #[ink(message)]
         pub fn stake(&mut self,
             account: AccountId,
-            tx_hash: Vec<u8>) -> Result<(), Error> {
+            tx_hash: Vec<u8>) -> Result<(), ContractError> {
 
             // Staking can only be done by the operator once the transfer of the 
             // asset is verified through the tx-hash.
@@ -284,14 +284,14 @@ mod xaver {
             };
             self.stakes.push(new_stake);
             // 3. Send receipt token, e.g., XAV
-            let _ = self.env()
+            let amount = self.price as u128 * 1000000000000u128;
+            self.env()
                 .call_runtime(&RuntimeCall::Assets(AssetsCall::Transfer {
                     id: self.asset_id,
                     target: account.into(),
-                    amount: self.price.into(),
+                    amount: amount,
                 }))
-                .map_err(|_| RuntimeError::CallRuntimeFailed);
-
+                .map_err(|_| RuntimeError::CallRuntimeFailed)?;
 
             self.env().emit_event(XaverEvent {
                 operator: caller,

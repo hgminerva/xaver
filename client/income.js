@@ -16,12 +16,12 @@ console.log("Connected to:", (await api.rpc.system.chain()).toHuman());
 
 const CONTRACT = process.env.CONTRACT;
 const CONTRACT_ABI = process.env.CONTRACT_ABI;
-const ALICE = process.env.ALICE;
+const BOB = process.env.BOB;
 
 const abi = JSON.parse(fs.readFileSync(CONTRACT_ABI, "utf8"));
 const contract = new ContractPromise(api, abi, CONTRACT);
 const keyring = new Keyring({ type: "sr25519" });
-const alice = keyring.addFromUri(ALICE);
+const bob = keyring.addFromUri(BOB);
 
 const gasLimit = api.registry.createType('WeightV2', {
           refTime: 300000000000,
@@ -29,26 +29,14 @@ const gasLimit = api.registry.createType('WeightV2', {
 });
 const storageDepositLimit = null;
 
-const assetId = 1000000003; // XAV
-const stableAssetId = 1984; // USDT
-const operator = "XqDGJ69MXL1WhHZiQHsA8HJTu7auK3ZePQZJetMrq3GT5smso"; // Bob
-const price = 100;
-const share = 1;
-const maximumStakes = 1000;
-const duration = 1000; // 1,000 Blocks
+const amount = 100000000; // 100 USDT, 6 Decimals (Expected income 0.1 or 100,000)
 
 await new Promise(async (resolve, reject) => {
   const unsub = await contract.tx
-    .setup({ storageDepositLimit, gasLimit }, 
-        assetId,
-        stableAssetId,
-        operator,
-        price,
-        share,
-        maximumStakes,
-        duration,
+    .income({ storageDepositLimit, gasLimit }, 
+      amount,
     )
-    .signAndSend(alice, ({ status, events, data }) => {
+    .signAndSend(bob, ({ status, events, data }) => {
       console.log("Status:", status?.type);
       if(events?.length > 0) {
         events.forEach(({ event }) => {

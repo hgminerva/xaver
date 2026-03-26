@@ -31,14 +31,15 @@ const storageDepositLimit = null;
 
 const account = "XqAgtqWwwkyBcBDT892sSwogC11G3dXXEKNfVbnAn4jYJkrsd"   // Ferdie's account
 const txHash = "0x1234567890abcdefghijklmnopqrstuvwxyz"
+const nonce = await api.rpc.system.accountNextIndex(bob.address);
 
 await new Promise(async (resolve, reject) => {
   const unsub = await contract.tx
-    .stake({ storageDepositLimit, gasLimit }, 
+    .stake({ storageDepositLimit, gasLimit, tip: 1000000000 }, 
       account,
       txHash
     )
-    .signAndSend(bob, ({ status, events, data }) => {
+    .signAndSend(bob, nonce, ({ status, events, data }) => {
       console.log("Status:", status?.type);
       if(events?.length > 0) {
         events.forEach(({ event }) => {
