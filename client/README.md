@@ -3,6 +3,7 @@
 
 ## Install Polkadot API
 `npm install @polkadot/api`
+`npm install @polkadot/api-contract`
 
 ## Setup .env
 `npm install dotenv`
